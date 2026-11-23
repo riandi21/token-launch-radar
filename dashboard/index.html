@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — pre-token protocols ranked by implied launch value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#board-wrap">Skip to the board</a>
+<header class="top">
+  <div class="top-inner">
+    <p class="eyebrow">Token Launch Radar</p>
+    <h1>Which pre-token protocol launches next — and what it would be worth</h1>
+    <p class="lede">Every protocol without a token, ranked by implied launch value: TVL times a
+    category multiple fitted on launched tokens, times growth, maturity and the odds a
+    token ever lists. The snapshot is sealed; the model is fitted from it at run time.</p>
+    <dl class="kpis" id="kpis"></dl>
+  </div>
+</header>
+<main>
+  <section class="panel" id="model-panel" aria-labelledby="model-h">
+    <h2 id="model-h">How the value is fitted</h2>
+    <p class="formula">implied value = TVL &times; category multiple &times; growth &times; maturity &times; launch probability</p>
+    <p id="model-note"></p>
+    <div class="model-cols">
+      <div>
+        <h3>Fitted multiples (median mcap / TVL, shrunk toward the global median)</h3>
+        <table class="mini" id="multiples"></table>
+      </div>
+      <div>
+        <h3>Held-out test (comparables split by hash of slug)</h3>
+        <table class="mini" id="validation"></table>
+        <p class="fine" id="validation-note"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="board-wrap" aria-labelledby="board-h">
+    <h2 id="board-h">The board</h2>
+    <form class="filters" id="filters">
+      <label>Category
+        <select id="f-category"><option value="">All categories</option></select>
+      </label>
+      <label>Chain
+        <select id="f-chain"><option value="">All chains</option></select>
+      </label>
+      <label>Set
+        <select id="f-set">
+          <option value="">Watchlist + early</option>
+          <option value="watchlist">Watchlist only</option>
+          <option value="early">Early only</option>
+        </select>
+      </label>
+      <label class="grow">Search
+        <input id="f-search" type="search" placeholder="Protocol name or slug" autocomplete="off">
+      </label>
+      <label>Sort by
+        <select id="f-sort">
+          <option value="rank">Rank</option>
+          <option value="implied">Implied value</option>
+          <option value="tvl">TVL</option>
+          <option value="growth">7-day growth</option>
+          <option value="age">Age</option>
+        </select>
+      </label>
+    </form>
+    <p class="count" id="count"></p>
+    <div class="table-scroll">
+      <table class="board" id="board">
+        <thead>
+          <tr>
+            <th>Rank</th><th>Protocol</th><th>Category</th><th>Chains</th>
+            <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th>
+            <th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied value</th>
+          </tr>
+        </thead>
+        <tbody id="board-body"></tbody>
+      </table>
+    </div>
+    <p class="fine">Click a row for the model breakdown and the farm plan. Ranks are fixed by
+    implied value; sorting reorders the view without changing ranks.</p>
+  </section>
+
+  <section class="panel" id="detail-panel" aria-labelledby="detail-h" hidden>
+    <h2 id="detail-h">Protocol detail</h2>
+    <div id="detail"></div>
+  </section>
+
+  <section class="panel" id="live-wrap" aria-labelledby="live-h">
+    <h2 id="live-h">Already trading — not ranked</h2>
+    <p>The largest token-bearing protocols by market cap, shown with the market's own
+    value. They are the comparables the multiples are fitted on, not launch candidates.</p>
+    <div class="table-scroll">
+      <table class="board" id="live">
+        <thead>
+          <tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">mcap / TVL</th></tr>
+        </thead>
+        <tbody id="live-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="checks-h">
+    <h2 id="checks-h">Self-check</h2>
+    <ul class="checks" id="checks"></ul>
+    <p class="fine" id="source-note"></p>
+  </section>
+</main>
+<footer>
+  <p>Token Launch Radar &middot; model radar-2 &middot; built for the make.fun token-radar-01 bounty.
+  Values are model estimates from a sealed snapshot, not investment advice.</p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
