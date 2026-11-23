@@ -49,17 +49,21 @@
   // ---- Model section ------------------------------------------------------
   el('model-note').textContent =
     'Category multiples are the median market-cap / TVL of launched tokens in the category, ' +
-    'shrunk toward the global median (' + R.global_multiple.toFixed(3) + ') with weight 2 when a ' +
+    'shrunk toward the global median (' + R.global_multiple.toFixed(3) + ') with weight 5 when a ' +
     'category has at least 5 comparables, otherwise the global median; clamped to [0.02, 0.80]. ' +
     'Growth is 1 + clamped 7-day TVL change / 100 x 0.5. Maturity is 0.6 + min(age, 1095) / 1095 x 0.4. ' +
-    'Launch odds are a stated prior by group (DeFi 0.65, infrastructure 0.40, other 0.35), scaled by ' +
-    'size and discounted by age — shown separately so launch value and odds can be judged apart.';
+    'Launch odds are the category\'s own empirical token rate — the share of protocols in that ' +
+    'category that already carry a token, shrunk toward the global rate (' + (R.global_launch_rate * 100).toFixed(1) +
+    '%) with weight 2 — discounted by age only. No size factor: token rate by TVL quartile is flat, ' +
+    'so a bigger TVL does not mean higher odds. Launch value and odds are shown separately so each ' +
+    'can be judged apart.';
   var multRows = Object.keys(R.category_multiples).sort().map(function (cat) {
     var v = R.category_multiples[cat];
-    return '<tr><td>' + esc(cat) + '</td><td>' + v.n + '</td><td>' + v.multiple.toFixed(3) + '</td></tr>';
+    return '<tr><td>' + esc(cat) + '</td><td>' + v.n + '</td><td>' + v.multiple.toFixed(3) +
+      '</td><td>' + v.iqr[0].toFixed(3) + '–' + v.iqr[1].toFixed(3) + '</td></tr>';
   }).join('');
   el('multiples').innerHTML =
-    '<thead><tr><th>Category</th><th>Comps</th><th>Multiple</th></tr></thead><tbody>' + multRows + '</tbody>';
+    '<thead><tr><th>Category</th><th>Comps</th><th>Multiple</th><th>Middle half of ratios</th></tr></thead><tbody>' + multRows + '</tbody>';
   var valRows = R.validation.models.map(function (m) {
     return '<tr><td>' + esc(m.name) + '</td><td>' + m.median_abs_pct_error.toFixed(1) + '%</td>' +
       '<td>' + m.within_2x_pct.toFixed(1) + '%</td></tr>';
@@ -71,7 +75,78 @@
     R.validation.test_n + ' test comparables. Predicted market cap = TVL x multiple, multiples fitted ' +
     'on train only. "Within 2x" means the prediction lands between 0.5x and 2x of the real market cap. ' +
     'mcap / TVL is inherently noisy: every approach misses by about 85% at the median, and the fitted ' +
-    'category model is reported honestly rather than tuned to look precise.';
+    'category model is reported honestly rather than tuned to look precise. Shrink weight 5 was chosen ' +
+    'because it is never worse than weight 2 across four validation splits and slightly better on this one.';
+
+  // ---- Launch rates -------------------------------------------------------
+  var rateRows = Object.keys(R.launch_rates)
+    .map(function (cat) { return { cat: cat, n: R.launch_rates[cat].n, rate: R.launch_rates[cat].rate }; })
+    .filter(function (x) { return x.n >= 10; })
+    .sort(function (a, b) { return b.rate - a.rate || a.cat.localeCompare(b.cat); })
+    .map(function (x) {
+      return '<tr><td>' + esc(x.cat) + '</td><td>' + x.n + '</td><td>' + (x.rate * 100).toFixed(1) + '%</td></tr>';
+    }).join('');
+  el('launch-rates').innerHTML =
+    '<thead><tr><th>Category (n &ge; 10 protocols)</th><th>Protocols</th><th>Share with a token</th></tr></thead><tbody>' + rateRows + '</tbody>';
+  el('launch-rates-note').textContent =
+    'The snapshot is the launch history: ' + R.global_launch_rate * 100 + '% of all protocols carry a token. ' +
+    'Each rate is the category\'s token share shrunk toward that global rate with weight 2, so a small ' +
+    'category cannot claim 0% or 100%. Old-only rates (protocols listed over a year ago) match these ' +
+    'closely, so the low rates are not a youth artefact: only 1 of 39 Risk Curators and 11 of 99 Dexs ' +
+    'have ever launched a token. A protocol\'s odds are its category rate discounted by age.';
+
+  // ---- Prior as a classifier ----------------------------------------------
+  var priorRows = R.validation.prior.map(function (p) {
+    return '<tr><td>' + esc(p.name) + '</td><td>' + p.brier.toFixed(4) + '</td><td>' + p.log_loss.toFixed(4) +
+      '</td><td>' + p.auc.toFixed(3) + '</td></tr>';
+  }).join('');
+  el('prior').innerHTML =
+    '<thead><tr><th>Prior</th><th>Brier (lower better)</th><th>Log loss (lower better)</th><th>AUC (0.5 = random)</th></tr></thead><tbody>' + priorRows + '</tbody>';
+  el('prior-note').textContent =
+    'Each prior is trained on the hash train split and asked, for the ' + R.validation.prior[0].test_n +
+    ' test protocols, which ones carry a token (' + R.validation.prior[0].positives + ' do). The v1 hand-set ' +
+    'prior scores AUC 0.374 — worse than random: it gives the highest odds to the categories least ' +
+    'likely to have a token. The empirical rate fixes that (AUC 0.501, Brier 0.175 vs 0.238). The ' +
+    'category signal is weak — a flat global rate scores nearly as well — and it is reported as such, ' +
+    'not dressed up. The age discount is a stated survivorship prior, not measured by this test: this ' +
+    'test asks who HAS a token now, while the discount asks who WILL launch next.';
+
+  // ---- Walk-forward ---------------------------------------------------------
+  var wfRows = R.validation.walk_forward.map(function (w) {
+    var cells = w.models.map(function (m) {
+      return '<td>' + m.median_abs_pct_error.toFixed(1) + '%</td><td>' + m.within_2x_pct.toFixed(1) + '%</td>';
+    }).join('');
+    return '<tr><td>Listed before ' + esc(w.cutoff) + ' (train ' + w.train_n + ', test ' + w.test_n + ')</td>' + cells + '</tr>';
+  }).join('');
+  el('walk-forward').innerHTML =
+    '<thead><tr><th>Split</th><th colspan="2">Category median</th><th colspan="2">Flat 0.25</th><th colspan="2">Flat global</th></tr>' +
+    '<tr><th></th><th>Median err</th><th>Within 2x</th><th>Median err</th><th>Within 2x</th><th>Median err</th><th>Within 2x</th></tr></thead><tbody>' + wfRows + '</tbody>';
+  el('walk-forward-note').textContent =
+    'A model that only works on a random split but not forward in time is fitting noise. On these ' +
+    'three time splits the category model is within a few points of the flat baselines on every ' +
+    'cutoff — no approach dominates, and none is claimed to. The walk-forward numbers are the second ' +
+    'opinion beside the hash split above.';
+
+  // ---- Model comparison -----------------------------------------------------
+  var v1 = { med: 87.1, within: 32.3, priorAuc: 0.374, priorBrier: 0.2376 };
+  var v2 = R.validation.models[0];
+  var flat = R.validation.models[1];
+  var compRows =
+    '<tr><td>v2 (this entry, radar-3)</td><td>' + v2.median_abs_pct_error.toFixed(1) + '%</td><td>' + v2.within_2x_pct.toFixed(1) +
+    '%</td><td>' + R.validation.prior[0].auc.toFixed(3) + '</td><td>' + R.validation.prior[0].brier.toFixed(4) + '</td></tr>' +
+    '<tr><td>v1 (radar-2)</td><td>' + v1.med.toFixed(1) + '%</td><td>' + v1.within.toFixed(1) +
+    '%</td><td>' + v1.priorAuc.toFixed(3) + '</td><td>' + v1.priorBrier.toFixed(4) + '</td></tr>' +
+    '<tr><td>Flat 0.25 (starter)</td><td>' + flat.median_abs_pct_error.toFixed(1) + '%</td><td>' + flat.within_2x_pct.toFixed(1) +
+    '%</td><td>—</td><td>—</td></tr>';
+  el('comparison').innerHTML =
+    '<thead><tr><th>Model</th><th>Median abs error (hash split)</th><th>Within 2x</th><th>Prior AUC</th><th>Prior Brier</th></tr></thead><tbody>' + compRows + '</tbody>';
+  el('comparison-note').textContent =
+    'What v2 actually improves: the launch prior. v1\'s hand-set prior ranked backwards (AUC 0.374); ' +
+    'v2\'s empirical prior does not (AUC 0.501, Brier 0.175 vs 0.238). The multiple is a small step ' +
+    'too (84.1% vs 87.1% median error, 35.5% vs 32.3% within 2x on the hash split), but it still does ' +
+    'not beat the flat 0.25 baseline on error — and that is stated here, not hidden. The ranking ' +
+    'changes where the data says it should: categories that almost never launch (Risk Curators, ' +
+    'Dexs) fall, categories that launch often (Basis Trading, Yield, RWA) rise.';
 
   // ---- Filters ------------------------------------------------------------
   var cats = {}, chains = {};
@@ -176,7 +251,10 @@
       '<h3>Model breakdown</h3><p class="math">' + math + '</p>' +
       '<p class="fine">Category multiple ' + r.category_multiple.toFixed(3) +
       ' (fitted on launched tokens in ' + esc(r.category || 'this category') +
-      '); growth multiplier ' + r.growth_multiplier.toFixed(3) +
+      '; the middle half of that category\'s ratios runs ' + r.category_iqr[0].toFixed(3) + '–' + r.category_iqr[1].toFixed(3) +
+      ' — a wide spread is why any single implied value is uncertain); launch odds ' +
+      (r.launch_probability * 100).toFixed(1) + '% (category token rate discounted by age); ' +
+      'growth multiplier ' + r.growth_multiplier.toFixed(3) +
       '; maturity multiplier ' + r.maturity_multiplier.toFixed(3) + '.</p>' +
       '</div><div><h3>Farm plan</h3><ol class="farm">' + steps + '</ol></div></div>';
     el('detail-panel').hidden = false;

@@ -34,6 +34,28 @@
         <p class="fine" id="validation-note"></p>
       </div>
     </div>
+    <div class="model-cols">
+      <div>
+        <h3>Launch odds: empirical token rate by category</h3>
+        <table class="mini" id="launch-rates"></table>
+        <p class="fine" id="launch-rates-note"></p>
+      </div>
+      <div>
+        <h3>Does the prior predict? (held-out classifier)</h3>
+        <table class="mini" id="prior"></table>
+        <p class="fine" id="prior-note"></p>
+      </div>
+    </div>
+    <div>
+      <h3>Walk-forward test (train before a cutoff, test after it)</h3>
+      <table class="mini" id="walk-forward"></table>
+      <p class="fine" id="walk-forward-note"></p>
+    </div>
+    <div>
+      <h3>Model comparison: v2 against v1 and the flat baselines</h3>
+      <table class="mini" id="comparison"></table>
+      <p class="fine" id="comparison-note"></p>
+    </div>
   </section>
 
   <section class="panel" id="board-wrap" aria-labelledby="board-h">
@@ -108,7 +130,7 @@
   </section>
 </main>
 <footer>
-  <p>Token Launch Radar &middot; model radar-2 &middot; built for the make.fun token-radar-01 bounty.
+  <p>Token Launch Radar &middot; model radar-3 &middot; built for the make.fun token-radar-01 bounty.
   Values are model estimates from a sealed snapshot, not investment advice.</p>
 </footer>
 <script src="../data.js"></script>

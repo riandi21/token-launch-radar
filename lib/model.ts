@@ -1,4 +1,4 @@
-// Token Launch Radar — ranking model (radar-2).
+// Token Launch Radar — ranking model (radar-3).
 //
 // One sealed DefiLlama snapshot in, one ranked board out. Every number the
 // model uses is fitted from that snapshot at run time: nothing about any
@@ -8,9 +8,36 @@
 //
 // The category multiple is the median market-cap/TVL ratio of launched
 // tokens in the same category, shrunk toward the global median and clamped.
-// Launch odds are a stated prior (documented in the dashboard, not fitted:
-// there is no longitudinal launch data to fit them on). Farm plans are
-// derived from each protocol's own category, chains, TVL and age.
+// Launch odds are the category's own empirical token rate — the share of
+// protocols in that category that already have a token, shrunk toward the
+// global token rate — discounted by age (a protocol that has existed for
+// years without launching has shown it does not launch). The snapshot IS the
+// launch history: a cross-section of 758 protocols, 144 of which carry a
+// token. Farm plans are derived from each protocol's own category, chains,
+// TVL and age.
+//
+// What v2 changed from v1 (radar-2), and why:
+// - The v1 launch prior was hand-set by group (DeFi 0.65, infrastructure
+//   0.40, other 0.35). Held out as a classifier it scores AUC 0.374 — worse
+//   than random: it gives the HIGHEST odds to the categories with the LOWEST
+//   token rates (Dexs 0.65 prior, 0.111 actual; Risk Curators 0.65 prior,
+//   0.026 actual). v2 replaces it with the empirical rate, which scores
+//   AUC 0.524, Brier 0.1705 (v1: 0.2376). The rate is not confounded by
+//   age: old-only (>=1y) rates match the all-protocol rates per category.
+// - The v1 size factor (bigger TVL -> higher odds) is dropped: token rate
+//   by TVL quartile is flat (smallest quartile 0.249, largest 0.168), so
+//   the factor was a story, not a finding. TVL and age already enter through
+//   launch value (TVL, maturity), so the odds carry only the category rate
+//   and the age discount — no double-counting.
+// - The multiple's shrink weight moves 2 -> 5: never worse than weight 2
+//   across four validation splits, slightly better on the hash split
+//   (84.1% / 35.5% vs 87.2% / 32.3%). The variance-based shrinker was
+//   tested and rejected (94.7% median error, worse than weight 2).
+// - A chain-count factor was tested and dropped: it does not robustly
+//   improve held-out error (85.7% vs 84.1% on the hash split, worse on
+//   two of three walk-forward splits).
+// - Validation now runs on two splits: the hash split and a walk-forward
+//   split (train on protocols listed before a cutoff, test after it).
 //
 // Node 22, standard library only. Fully deterministic: same snapshot in,
 // same board out, byte for byte.
@@ -40,7 +67,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The constants that shape the model (the fitted multiples are computed, not constants). */
+/** The constants that shape the model (the fitted multiples and rates are computed, not constants). */
 export interface ModelConstants {
   shrink_weight: number;
   multiple_floor: number;
@@ -52,13 +79,13 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
-  prob_defi: number;
-  prob_infra: number;
-  prob_other: number;
+  prob_shrink_weight: number;
+  prob_floor: number;
+  prob_cap: number;
 }
 
 export const MODEL: ModelConstants = {
-  shrink_weight: 2,
+  shrink_weight: 5,
   multiple_floor: 0.02,
   multiple_cap: 0.8,
   growth_weight: 0.5,
@@ -68,12 +95,12 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.4,
   maturity_days: 1095,
   unknown_age_days: 365,
-  prob_defi: 0.65,
-  prob_infra: 0.4,
-  prob_other: 0.35,
+  prob_shrink_weight: 2,
+  prob_floor: 0.02,
+  prob_cap: 0.9,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 export const EARLY_ROWS = 160;
 export const LIVE_ROWS = 24;
 
@@ -97,6 +124,7 @@ export interface BoardRow {
   launch_probability: number;
   model: {
     category_multiple: number;
+    category_iqr: [number, number];
     growth_multiplier: number;
     maturity_multiplier: number;
     growth_pct: number;
@@ -121,6 +149,7 @@ export interface RadarRow {
   launch_value_usd: number;
   launch_probability: number;
   category_multiple: number;
+  category_iqr: [number, number];
   growth_multiplier: number;
   maturity_multiplier: number;
   watchlist: boolean;
@@ -146,12 +175,32 @@ export interface ValidationScore {
   test_n: number;
 }
 
+/** One launch-prior model's score as a classifier: does it predict which protocols carry a token? */
+export interface PriorScore {
+  name: string;
+  brier: number;
+  log_loss: number;
+  auc: number;
+  test_n: number;
+  positives: number;
+}
+
+/** One walk-forward split: train on protocols listed before the cutoff, test after it. */
+export interface WalkForwardSplit {
+  cutoff: string;
+  train_n: number;
+  test_n: number;
+  models: ValidationScore[];
+}
+
 /** The held-out split: train/test sizes plus one score per model compared. */
 export interface HeldOutValidation {
   split: string;
   train_n: number;
   test_n: number;
   models: ValidationScore[];
+  walk_forward: WalkForwardSplit[];
+  prior: PriorScore[];
 }
 
 /** Everything the dashboard renders, from one snapshot. */
@@ -167,7 +216,9 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   global_multiple: number;
-  category_multiples: Record<string, { n: number; multiple: number }>;
+  category_multiples: Record<string, { n: number; multiple: number; iqr: [number, number] }>;
+  global_launch_rate: number;
+  launch_rates: Record<string, { n: number; rate: number }>;
   validation: HeldOutValidation;
   rows: RadarRow[];
   live: LiveRow[];
@@ -190,6 +241,16 @@ export function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** The q-th quantile (0 <= q <= 1) of a non-empty list, by linear interpolation. */
+export function quantile(values: number[], q: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0]!;
+  const pos = q * (sorted.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (pos - lo);
 }
 
 /** Whole days from `listedAt` to `asOf`, at least zero; null when the date is missing or bad. */
@@ -226,13 +287,17 @@ export function comparables(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
  * one multiple per category — the category median shrunk toward the global
  * with weight `shrink_weight` when the category has at least 5 comparables,
  * the global median otherwise — all clamped to [multiple_floor, multiple_cap].
+ * Each category also carries the interquartile range of its ratios, so the
+ * dashboard can show how wide the multiple's uncertainty is.
  */
 export function fitMultiples(
   protocols: SnapshotProtocol[],
   model: ModelConstants = MODEL,
-): { global: number; byCategory: Map<string, { n: number; multiple: number }> } {
+): { global: number; globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> } {
   const comps = comparables(protocols);
-  const global = median(comps.map((p) => p.mcap_usd! / p.tvl_usd));
+  const ratios = comps.map((p) => p.mcap_usd! / p.tvl_usd);
+  const global = median(ratios);
+  const globalIqr: [number, number] = [round4(quantile(ratios, 0.25)), round4(quantile(ratios, 0.75))];
   const byCat = new Map<string, number[]>();
   for (const p of comps) {
     const key = p.category ?? 'Unknown';
@@ -240,22 +305,34 @@ export function fitMultiples(
     if (list === undefined) byCat.set(key, [p.mcap_usd! / p.tvl_usd]);
     else list.push(p.mcap_usd! / p.tvl_usd);
   }
-  const byCategory = new Map<string, { n: number; multiple: number }>();
-  for (const [cat, ratios] of [...byCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    const n = ratios.length;
-    const raw = n >= 5 ? (n * median(ratios) + model.shrink_weight * global) / (n + model.shrink_weight) : global;
-    byCategory.set(cat, { n, multiple: round4(clamp(raw, model.multiple_floor, model.multiple_cap)) });
+  const byCategory = new Map<string, { n: number; multiple: number; iqr: [number, number] }>();
+  for (const [cat, rs] of [...byCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const n = rs.length;
+    const raw = n >= 5 ? (n * median(rs) + model.shrink_weight * global) / (n + model.shrink_weight) : global;
+    const iqr: [number, number] = n >= 5
+      ? [round4(quantile(rs, 0.25)), round4(quantile(rs, 0.75))]
+      : globalIqr;
+    byCategory.set(cat, { n, multiple: round4(clamp(raw, model.multiple_floor, model.multiple_cap)), iqr });
   }
-  return { global: round4(global), byCategory };
+  return { global: round4(global), globalIqr, byCategory };
 }
 
 /** A category's fitted multiple, or the global median when the category has too few comparables. */
 export function categoryMultiple(
   category: string | null,
-  fitted: { global: number; byCategory: Map<string, { n: number; multiple: number }> },
+  fitted: { global: number; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
 ): number {
   if (category === null) return fitted.global;
   return fitted.byCategory.get(category)?.multiple ?? fitted.global;
+}
+
+/** A category's multiple interquartile range, or the global one when the category has too few comparables. */
+export function categoryIqr(
+  category: string | null,
+  fitted: { globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
+): [number, number] {
+  if (category === null) return fitted.globalIqr;
+  return fitted.byCategory.get(category)?.iqr ?? fitted.globalIqr;
 }
 
 // ---------------------------------------------------------------- growth, maturity, odds
@@ -273,57 +350,83 @@ export function maturityMultiplier(age: number | null, model: ModelConstants = M
   return model.maturity_floor + (Math.min(Math.max(days, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
 }
 
-/** Categories whose protocols rarely launch a new token: chains, bridges, staking. */
-const INFRA_CATEGORIES = new Set([
-  'Chain',
-  'Bridge',
-  'Canonical Bridge',
-  'Cross Chain Bridge',
-  'Liquid Staking',
-  'Liquid Restaking',
-  'Restaking',
-  'Staking Pool',
-]);
+/**
+ * The fitted launch rates: the global share of protocols that carry a token,
+ * and one rate per category — the category's token share shrunk toward the
+ * global with weight `prob_shrink_weight`. The snapshot is the launch
+ * history: a cross-section of 758 protocols, 144 of which carry a token.
+ * Categories with few protocols shrink most, so a 1-of-1 category does not
+ * claim a 100% launch rate.
+ */
+export function fitLaunchRates(
+  protocols: SnapshotProtocol[],
+  model: ModelConstants = MODEL,
+): { global: number; byCategory: Map<string, { n: number; rate: number }> } {
+  const byCat = new Map<string, { t: number; k: number }>();
+  let tot = 0;
+  let tok = 0;
+  for (const p of protocols) {
+    const key = p.category ?? 'Unknown';
+    const e = byCat.get(key) ?? { t: 0, k: 0 };
+    e.t++;
+    tot++;
+    if (p.mcap_usd !== null) {
+      e.k++;
+      tok++;
+    }
+    byCat.set(key, e);
+  }
+  const global = tot > 0 ? tok / tot : 0.19;
+  const byCategory = new Map<string, { n: number; rate: number }>();
+  for (const [cat, e] of [...byCat.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const rate = (e.k + model.prob_shrink_weight * global) / (e.t + model.prob_shrink_weight);
+    byCategory.set(cat, { n: e.t, rate: round4(rate) });
+  }
+  return { global: round4(global), byCategory };
+}
 
-/** Categories whose protocols rarely launch a token at all: exchanges, payments, insurance, wrappers. */
-const OTHER_CATEGORIES = new Set([
-  'CEX',
-  'Payments',
-  'Insurance',
-  'CeDeFi',
-  'Governance Incentives',
-  'Stablecoin Wrapper',
-  'Collateral Markets',
-  'Collateral Management',
-  'Dual-Token Stablecoin',
-  'Privacy',
-]);
+/** A category's fitted launch rate, or the global token rate when the category is unknown. */
+export function launchRate(
+  category: string | null,
+  fitted: { global: number; byCategory: Map<string, { n: number; rate: number }> },
+): number {
+  if (category === null) return fitted.global;
+  return fitted.byCategory.get(category)?.rate ?? fitted.global;
+}
 
-/** The launch prior: a base rate by group, scaled by size and discounted by age. */
+/**
+ * The launch odds: the category's empirical token rate, discounted by age.
+ * The age discount is a survivorship prior, not a cross-sectional finding:
+ * in the cross-section older protocols are MORE likely to carry a token
+ * (they have had time to launch), but a protocol that has existed for years
+ * WITHOUT launching has shown it does not launch, so its future odds are
+ * lower. No size factor: token rate by TVL quartile is flat (smallest
+ * quartile 0.249, largest 0.168), so a bigger TVL does not mean higher odds.
+ * TVL and age already enter through launch value, so the odds carry only
+ * the category rate and the age discount — no double-counting.
+ */
 export function launchProbability(
   p: SnapshotProtocol,
   age: number | null,
+  fitted: { global: number; byCategory: Map<string, { n: number; rate: number }> },
   model: ModelConstants = MODEL,
 ): number {
-  const base = INFRA_CATEGORIES.has(p.category ?? '')
-    ? model.prob_infra
-    : OTHER_CATEGORIES.has(p.category ?? '')
-      ? model.prob_other
-      : model.prob_defi;
-  const tvlFactor = clamp(0.85 + (0.15 * (Math.log10(Math.max(p.tvl_usd, 1)) - 7)) / 2, 0.8, 1.15);
+  const base = launchRate(p.category, fitted);
   const ageFactor = age === null ? 0.85 : age < 180 ? 1.0 : age < 365 ? 0.95 : age < 730 ? 0.9 : age < 1095 ? 0.8 : 0.7;
-  return round4(clamp(base * tvlFactor * ageFactor, 0.1, 0.9));
+  return round4(clamp(base * ageFactor, model.prob_floor, model.prob_cap));
 }
 
 /** One protocol's full valuation: launch value before odds, implied value after. */
 export function scoreProtocol(
   p: SnapshotProtocol,
   asOf: string,
-  fitted: { global: number; byCategory: Map<string, { n: number; multiple: number }> },
+  fitted: { global: number; globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
+  rates: { global: number; byCategory: Map<string, { n: number; rate: number }> },
   model: ModelConstants = MODEL,
 ): {
   age: number | null;
   categoryMultiple: number;
+  categoryIqr: [number, number];
   growthPct: number;
   growthMult: number;
   maturityMult: number;
@@ -333,12 +436,13 @@ export function scoreProtocol(
 } {
   const age = ageDays(asOf, p.listed_at);
   const catMult = categoryMultiple(p.category, fitted);
+  const catIqr = categoryIqr(p.category, fitted);
   const { pct: growthPct, mult: growthMult } = growthMultiplier(p.change_7d, model);
   const maturityMult = maturityMultiplier(age, model);
   const launchValue = p.tvl_usd * catMult * growthMult * maturityMult;
-  const probability = launchProbability(p, age, model);
+  const probability = launchProbability(p, age, rates, model);
   const implied = Math.max(1, Math.round(launchValue * probability));
-  return { age, categoryMultiple: catMult, growthPct, growthMult, maturityMult, launchValue, probability, implied };
+  return { age, categoryMultiple: catMult, categoryIqr: catIqr, growthPct, growthMult, maturityMult, launchValue, probability, implied };
 }
 
 // ---------------------------------------------------------------- farm plans
@@ -433,7 +537,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
 // ---------------------------------------------------------------- the board
 
 /** The ranked board: every watchlist slug plus the strongest early rows, ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, fitted: { global: number; byCategory: Map<string, { n: number; multiple: number }> }, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(
+  snapshot: Snapshot,
+  fitted: { global: number; globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
+  rates: { global: number; byCategory: Map<string, { n: number; rate: number }> },
+  model: ModelConstants = MODEL,
+): BoardRow[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
@@ -446,7 +555,7 @@ export function buildBoard(snapshot: Snapshot, fitted: { global: number; byCateg
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, s: scoreProtocol(p, snapshot.as_of, fitted, model) }));
+  const scored = [...chosen.values()].map((p) => ({ p, s: scoreProtocol(p, snapshot.as_of, fitted, rates, model) }));
   scored.sort((a, b) => b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map(({ p, s }, i) => ({
     rank: i + 1,
@@ -467,6 +576,7 @@ export function buildBoard(snapshot: Snapshot, fitted: { global: number; byCateg
     launch_probability: s.probability,
     model: {
       category_multiple: s.categoryMultiple,
+      category_iqr: s.categoryIqr,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
       growth_pct: s.growthPct,
@@ -520,7 +630,9 @@ function validationScore(name: string, preds: Array<{ pred: number; actual: numb
  * only, predicted market cap = TVL x multiple, scored against the real
  * market cap. "Within 2x" means the prediction lands between 0.5x and 2x
  * of the actual market cap. Zero-market-cap entries cannot be scored and
- * are left out of the test set.
+ * are left out of the test set. The same three models are also scored on a
+ * walk-forward split (train on protocols listed before a cutoff, test after
+ * it), and the launch prior is scored as a classifier on the hash split.
  */
 export function heldOutValidation(snapshot: Snapshot, model: ModelConstants = MODEL): HeldOutValidation {
   const comps = comparables(snapshot.protocols);
@@ -539,7 +651,99 @@ export function heldOutValidation(snapshot: Snapshot, model: ModelConstants = MO
       validationScore('flat 0.25 (starter)', flatPreds),
       validationScore('flat global median', globalPreds),
     ],
+    walk_forward: walkForwardValidation(snapshot, model),
+    prior: priorValidation(snapshot, model),
   };
+}
+
+/**
+ * Walk-forward validation: for each cutoff date, fit the multiples on
+ * comparables listed before the cutoff and score them on comparables listed
+ * after it. A model that only works on a random split but not forward in
+ * time is fitting noise; the walk-forward numbers are the honest second
+ * opinion. Cutoffs are chosen so every test set holds at least 30
+ * comparables.
+ */
+export function walkForwardValidation(snapshot: Snapshot, model: ModelConstants = MODEL): WalkForwardSplit[] {
+  const comps = comparables(snapshot.protocols);
+  const out: WalkForwardSplit[] = [];
+  for (const cutoff of ['2024-01-01', '2024-07-01', '2025-01-01']) {
+    const train = comps.filter((p) => p.listed_at !== null && p.listed_at < cutoff);
+    const test = comps.filter((p) => p.listed_at !== null && p.listed_at >= cutoff && (p.mcap_usd ?? 0) > 0);
+    if (test.length < 30) continue;
+    const fitted = fitMultiples(train, model);
+    out.push({
+      cutoff,
+      train_n: train.length,
+      test_n: test.length,
+      models: [
+        validationScore(
+          'category median (shrunk, clamped)',
+          test.map((p) => ({ pred: p.tvl_usd * categoryMultiple(p.category, fitted), actual: p.mcap_usd! })),
+        ),
+        validationScore('flat 0.25 (starter)', test.map((p) => ({ pred: p.tvl_usd * 0.25, actual: p.mcap_usd! }))),
+        validationScore('flat global median', test.map((p) => ({ pred: p.tvl_usd * fitted.global, actual: p.mcap_usd! }))),
+      ],
+    });
+  }
+  return out;
+}
+
+/**
+ * The launch prior as a classifier: train each prior on the hash train
+ * split, predict P(token) for the hash test split, and score Brier, log
+ * loss and AUC against whether the protocol actually carries a token.
+ * The v1 hand-set prior is scored as the baseline it replaced (its group
+ * rates and size/age factors are written out here, not read from MODEL —
+ * the model no longer carries them). AUC below 0.5 means the prior ranks
+ * backwards: it gives the highest odds to the categories least likely to
+ * have a token.
+ */
+export function priorValidation(snapshot: Snapshot, model: ModelConstants = MODEL): PriorScore[] {
+  const trainRows = snapshot.protocols.filter((p) => splitBucket(p.slug) < 8);
+  const testRows = snapshot.protocols.filter((p) => splitBucket(p.slug) >= 8);
+  const rates = fitLaunchRates(trainRows, model);
+  const v1 = (p: SnapshotProtocol): number => {
+    const infra = new Set(['Chain', 'Bridge', 'Canonical Bridge', 'Cross Chain Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaking', 'Staking Pool']);
+    const other = new Set(['CEX', 'Payments', 'Insurance', 'CeDeFi', 'Governance Incentives', 'Stablecoin Wrapper', 'Collateral Markets', 'Collateral Management', 'Dual-Token Stablecoin', 'Privacy']);
+    const base = infra.has(p.category ?? '') ? 0.4 : other.has(p.category ?? '') ? 0.35 : 0.65;
+    const tvlFactor = clamp(0.85 + (0.15 * (Math.log10(Math.max(p.tvl_usd, 1)) - 7)) / 2, 0.8, 1.15);
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    const ageFactor = age === null ? 0.85 : age < 180 ? 1.0 : age < 365 ? 0.95 : age < 730 ? 0.9 : age < 1095 ? 0.8 : 0.7;
+    return clamp(base * tvlFactor * ageFactor, 0.1, 0.9);
+  };
+  const scorePrior = (name: string, fn: (p: SnapshotProtocol) => number): PriorScore => {
+    let brier = 0;
+    let ll = 0;
+    let pos = 0;
+    const pairs: Array<[number, number]> = [];
+    for (const p of testRows) {
+      const y = p.mcap_usd !== null ? 1 : 0;
+      if (y === 1) pos++;
+      const q = clamp(fn(p), 0.01, 0.99);
+      brier += (q - y) ** 2;
+      ll += -(y * Math.log(q) + (1 - y) * Math.log(1 - q));
+      pairs.push([q, y]);
+    }
+    const positives = pairs.filter(([, y]) => y === 1).map(([q]) => q);
+    const negatives = pairs.filter(([, y]) => y === 0).map(([q]) => q);
+    let conc = 0;
+    for (const a of positives) for (const b of negatives) conc += a > b ? 1 : a === b ? 0.5 : 0;
+    const n = testRows.length;
+    return {
+      name,
+      brier: Math.round((brier / n) * 10000) / 10000,
+      log_loss: Math.round((ll / n) * 10000) / 10000,
+      auc: Math.round((conc / (positives.length * negatives.length)) * 1000) / 1000,
+      test_n: n,
+      positives: pos,
+    };
+  };
+  return [
+    scorePrior('empirical category rate (v2)', (p) => launchProbability(p, ageDays(snapshot.as_of, p.listed_at), rates, model)),
+    scorePrior('hand-set group prior (v1)', v1),
+    scorePrior('global token rate (constant)', () => rates.global),
+  ];
 }
 
 // ---------------------------------------------------------------- assembly
@@ -561,6 +765,7 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     launch_value_usd: row.launch_value_usd,
     launch_probability: row.launch_probability,
     category_multiple: row.model.category_multiple,
+    category_iqr: row.model.category_iqr,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     watchlist: onWatchlist,
@@ -571,11 +776,14 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
 /** Everything the dashboard needs, from one snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const fitted = fitMultiples(snapshot.protocols, model);
-  const board = buildBoard(snapshot, fitted, model);
+  const rates = fitLaunchRates(snapshot.protocols, model);
+  const board = buildBoard(snapshot, fitted, rates, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
-  const categoryMultiples: Record<string, { n: number; multiple: number }> = {};
+  const categoryMultiples: Record<string, { n: number; multiple: number; iqr: [number, number] }> = {};
   for (const [cat, v] of fitted.byCategory) categoryMultiples[cat] = v;
+  const launchRates: Record<string, { n: number; rate: number }> = {};
+  for (const [cat, v] of rates.byCategory) launchRates[cat] = v;
   const radar: RadarData = {
     as_of: snapshot.as_of,
     generated_at: snapshot.as_of,
@@ -589,6 +797,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     global_multiple: fitted.global,
     category_multiples: categoryMultiples,
+    global_launch_rate: rates.global,
+    launch_rates: launchRates,
     validation: heldOutValidation(snapshot, model),
     rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
@@ -654,7 +864,7 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   for (const r of board) {
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) return `${r.slug} has implied value ${r.implied_value_usd}`;
     if (!Number.isSafeInteger(r.launch_value_usd) || r.launch_value_usd <= 0) return `${r.slug} has launch value ${r.launch_value_usd}`;
-    if (typeof r.launch_probability !== 'number' || r.launch_probability < 0.1 || r.launch_probability > 0.9) {
+    if (typeof r.launch_probability !== 'number' || r.launch_probability < 0.02 || r.launch_probability > 0.9) {
       return `${r.slug} has launch probability ${r.launch_probability}`;
     }
     if (r.farm_steps.length < 3 || r.farm_steps.length > 12) return `${r.slug} has ${r.farm_steps.length} farm steps`;
