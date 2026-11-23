@@ -89,6 +89,17 @@ select:focus, input:focus { outline: 2px solid var(--amber); outline-offset: 1px
 .board td.name small { display: block; color: var(--faint); font-weight: 400; font-size: 12px; }
 .up { color: var(--green); }
 .down { color: var(--red); }
+.lri {
+  display: inline-block; min-width: 34px; text-align: center;
+  font-weight: 700; color: var(--amber-soft); background: var(--bg-soft);
+  border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px;
+}
+.lri.big { font-size: 20px; min-width: 52px; padding: 3px 10px; }
+.why {
+  background: var(--bg-soft); border-left: 3px solid var(--amber);
+  border-radius: 0 8px 8px 0; padding: 10px 14px; font-size: 15px;
+}
+.mini td small { display: block; color: var(--faint); font-weight: 400; font-size: 12px; }
 .tag {
   display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--amber); border: 1px solid var(--amber);
@@ -107,3 +118,12 @@ ol.farm li { margin-bottom: 10px; }
 .checks li.fail::before { content: "\2717"; color: var(--red); }
 .fine { color: var(--faint); font-size: 13px; margin-bottom: 0; }
 footer { max-width: 1080px; margin: 0 auto; padding: 0 20px 32px; color: var(--faint); font-size: 13px; }
+@media (max-width: 720px) {
+  h1 { font-size: 24px; }
+  .top-inner { padding: 28px 16px 20px; }
+  main { padding: 16px 12px 8px; }
+  .panel { padding: 16px 14px; }
+  th, td { padding: 6px 7px; font-size: 13px; }
+  .board td.name small { font-size: 11px; }
+  .kpis dd { font-size: 19px; }
+}

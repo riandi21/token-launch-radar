@@ -46,6 +46,18 @@
         <p class="fine" id="prior-note"></p>
       </div>
     </div>
+    <div class="model-cols">
+      <div>
+        <h3>Age discount: fitted Weibull hazard</h3>
+        <table class="mini" id="weibull"></table>
+        <p class="fine" id="weibull-note"></p>
+      </div>
+      <div>
+        <h3>Launch Readiness Index: a second lens</h3>
+        <table class="mini" id="lri-table"></table>
+        <p class="fine" id="lri-note"></p>
+      </div>
+    </div>
     <div>
       <h3>Walk-forward test (train before a cutoff, test after it)</h3>
       <table class="mini" id="walk-forward"></table>
@@ -81,6 +93,7 @@
         <select id="f-sort">
           <option value="rank">Rank</option>
           <option value="implied">Implied value</option>
+          <option value="readiness">Readiness (LRI)</option>
           <option value="tvl">TVL</option>
           <option value="growth">7-day growth</option>
           <option value="age">Age</option>
@@ -95,13 +108,45 @@
             <th>Rank</th><th>Protocol</th><th>Category</th><th>Chains</th>
             <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th>
             <th class="num">Launch value</th><th class="num">Odds</th><th class="num">Implied value</th>
+            <th class="num">LRI</th>
           </tr>
         </thead>
         <tbody id="board-body"></tbody>
       </table>
     </div>
     <p class="fine">Click a row for the model breakdown and the farm plan. Ranks are fixed by
-    implied value; sorting reorders the view without changing ranks.</p>
+    implied value; sorting reorders the view without changing ranks. LRI is a second lens —
+    how ready a protocol is to launch — not a second ranking.</p>
+  </section>
+
+  <section class="panel" id="insights-wrap" aria-labelledby="insights-h">
+    <h2 id="insights-h">What the board says</h2>
+    <p>Cross-cutting reads from the 200 ranked rows, computed from the snapshot at run time —
+    not opinions, just the data grouped three ways.</p>
+    <div class="model-cols">
+      <div>
+        <h3>Category momentum: median 7-day TVL change of pre-token protocols</h3>
+        <table class="mini" id="momentum"></table>
+        <p class="fine" id="momentum-note"></p>
+      </div>
+      <div>
+        <h3>Where the pre-token TVL sits</h3>
+        <table class="mini" id="pretoken-tvl"></table>
+        <p class="fine" id="pretoken-note"></p>
+      </div>
+    </div>
+    <div class="model-cols">
+      <div>
+        <h3>Held back by odds: biggest launch value outside the top 10</h3>
+        <table class="mini" id="held-back"></table>
+        <p class="fine" id="held-back-note"></p>
+      </div>
+      <div>
+        <h3>How the 200 rows' launch odds are distributed</h3>
+        <table class="mini" id="odds-buckets"></table>
+        <p class="fine" id="odds-note"></p>
+      </div>
+    </div>
   </section>
 
   <section class="panel" id="detail-panel" aria-labelledby="detail-h" hidden>
@@ -130,7 +175,7 @@
   </section>
 </main>
 <footer>
-  <p>Token Launch Radar &middot; model radar-3 &middot; built for the make.fun token-radar-01 bounty.
+  <p>Token Launch Radar &middot; model radar-4 &middot; built for the make.fun token-radar-01 bounty.
   Values are model estimates from a sealed snapshot, not investment advice.</p>
 </footer>
 <script src="../data.js"></script>

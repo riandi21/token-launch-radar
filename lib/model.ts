@@ -1,4 +1,4 @@
-// Token Launch Radar — ranking model (radar-3).
+// Token Launch Radar — ranking model (radar-4).
 //
 // One sealed DefiLlama snapshot in, one ranked board out. Every number the
 // model uses is fitted from that snapshot at run time: nothing about any
@@ -10,34 +10,62 @@
 // tokens in the same category, shrunk toward the global median and clamped.
 // Launch odds are the category's own empirical token rate — the share of
 // protocols in that category that already have a token, shrunk toward the
-// global token rate — discounted by age (a protocol that has existed for
-// years without launching has shown it does not launch). The snapshot IS the
-// launch history: a cross-section of 758 protocols, 144 of which carry a
-// token. Farm plans are derived from each protocol's own category, chains,
+// global token rate — discounted by age. The snapshot IS the launch
+// history: a cross-section of 758 protocols, 144 of which carry a token.
+// Farm plans are derived from each protocol's own category, chains,
 // TVL and age.
 //
-// What v2 changed from v1 (radar-2), and why:
-// - The v1 launch prior was hand-set by group (DeFi 0.65, infrastructure
-//   0.40, other 0.35). Held out as a classifier it scores AUC 0.374 — worse
-//   than random: it gives the HIGHEST odds to the categories with the LOWEST
-//   token rates (Dexs 0.65 prior, 0.111 actual; Risk Curators 0.65 prior,
-//   0.026 actual). v2 replaces it with the empirical rate, which scores
-//   AUC 0.524, Brier 0.1705 (v1: 0.2376). The rate is not confounded by
-//   age: old-only (>=1y) rates match the all-protocol rates per category.
-// - The v1 size factor (bigger TVL -> higher odds) is dropped: token rate
-//   by TVL quartile is flat (smallest quartile 0.249, largest 0.168), so
-//   the factor was a story, not a finding. TVL and age already enter through
-//   launch value (TVL, maturity), so the odds carry only the category rate
-//   and the age discount — no double-counting.
-// - The multiple's shrink weight moves 2 -> 5: never worse than weight 2
-//   across four validation splits, slightly better on the hash split
-//   (84.1% / 35.5% vs 87.2% / 32.3%). The variance-based shrinker was
-//   tested and rejected (94.7% median error, worse than weight 2).
-// - A chain-count factor was tested and dropped: it does not robustly
-//   improve held-out error (85.7% vs 84.1% on the hash split, worse on
-//   two of three walk-forward splits).
-// - Validation now runs on two splits: the hash split and a walk-forward
-//   split (train on protocols listed before a cutoff, test after it).
+// What v3 changed from v2 (radar-3), and why:
+// - The age discount is now FITTED, not hand-set. v2 used fixed steps
+//   (1.00 <180d, 0.95, 0.90, 0.80, 0.70 >3y). v3 fits a Weibull hazard
+//   model to the snapshot itself: P(token by age a) = 1 - exp(-(a/lambda)^k).
+//   The fit gives k = 0.76, lambda = 6500 days — k < 1 means a DECREASING
+//   hazard, i.e. a protocol that survives years without launching is less
+//   likely to launch next year. The discount is the 1-year forward launch
+//   probability relative to a 90-day-old protocol, so it is smooth (0.93 at
+//   180d, 0.83 at 1y, 0.74 at 2y, 0.68 at 3y, 0.57 at ~7y) instead of steps.
+//   It is fitted on the train split for validation and on all protocols for
+//   the board, exactly like the launch rates. On the has-token classifier it
+//   scores AUC 0.519, Brier 0.1765 — slightly better than v2's hand-set
+//   steps (0.501 / 0.1751) on AUC, slightly worse on Brier, and worse than
+//   no discount at all (0.524 / 0.1704), which is expected: the classifier
+//   asks who HAS a token now, and in the cross-section older protocols are
+//   MORE likely to have one (token rate 0.034 under 180d, 0.294 over 3y).
+//   The discount answers the forward question — who WILL launch next —
+//   and the Weibull fit is the data's own answer to it, not a hand-set
+//   guess. The top 10 barely moves (Veda, USDD, OnRe stay 1-2-3; the
+//   biggest mover anywhere is 14 ranks), so the discount is a refinement,
+//   not a reshuffle.
+// - The mcap estimator is UNCHANGED (median multiple, shrink weight 5).
+//   v3 tested trimmed means (10%: 118.2%, 20%: 90.3% — both worse),
+//   a median (L1) regression on log mcap (solver returns non-finite
+//   coefficients, the same numerical failure as v2; v1 already showed the
+//   log-log regression does not beat flat), a primary-chain multiple (no
+//   better than category, and the geometric mean of the two loses on
+//   walk-forward), a growth interaction (slopes ~0, no improvement), and
+//   an age effect on the multiple (no monotone trend across age bands).
+//   The median multiple is at its ceiling on this snapshot: 84.1% median
+//   error, 35.5% within 2x on the hash split, still short of flat 0.25
+//   (82.7%). v3 reports that honestly instead of tuning the multiple to
+//   look precise. change_1m was never tested — the snapshot carries no
+//   change_1d or change_1m field, only change_7d (754/758 non-null).
+// - NEW: the Launch Readiness Index (LRI), a 0-100 score answering a
+//   different question from implied value: how ready is this protocol to
+//   launch — category launch rate (40%), TVL scale (25%), 7-day momentum
+//   (20%), age/maturity (15%). It is a separate column and sort on the
+//   board. It correlates 0.78 with implied-value rank (Spearman; same
+//   ingredients, different question) and surfaces protocols the value
+//   ranking buries (Shift DeFi is implied #30 but LRI #3; RIF ON CHAIN
+//   #54, LRI #2; Manta CeDeFi #27, LRI #4). Reported as a lens, not a
+//   prediction.
+// - NEW: category momentum (median 7-day change of pre-token protocols
+//   per category), pre-token TVL by category, the "held back by odds"
+//   list (biggest launch value outside the implied top 10), and an
+//   odds-distribution summary — all computed from the snapshot at runtime.
+// - NEW in the detail view: the protocol's 7-day change against its
+//   category's median, its three closest comparables in the same category
+//   (by TVL), and a plain-language "why this rank" line naming the factor
+//   that drives the value.
 //
 // Node 22, standard library only. Fully deterministic: same snapshot in,
 // same board out, byte for byte.
@@ -67,7 +95,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The constants that shape the model (the fitted multiples and rates are computed, not constants). */
+/** The constants that shape the model (the fitted multiples, rates and hazard are computed, not constants). */
 export interface ModelConstants {
   shrink_weight: number;
   multiple_floor: number;
@@ -82,6 +110,22 @@ export interface ModelConstants {
   prob_shrink_weight: number;
   prob_floor: number;
   prob_cap: number;
+  /** Weibull hazard grid for the age discount: k from k_min to k_max in k_step; lambda from lam_min to lam_max in lam_step. */
+  weibull_k_min: number;
+  weibull_k_max: number;
+  weibull_k_step: number;
+  weibull_lam_min: number;
+  weibull_lam_max: number;
+  weibull_lam_step: number;
+  /** Forward horizon, in days, for the age discount (1-year forward launch probability). */
+  weibull_horizon_days: number;
+  /** Reference age, in days, the age factor is normalised against (a 90-day-old protocol scores 1.0). */
+  weibull_ref_days: number;
+  /** Launch Readiness Index weights (category rate, TVL scale, 7-day momentum, age), summing to 100. */
+  lri_cat_weight: number;
+  lri_scale_weight: number;
+  lri_mom_weight: number;
+  lri_age_weight: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -98,9 +142,21 @@ export const MODEL: ModelConstants = {
   prob_shrink_weight: 2,
   prob_floor: 0.02,
   prob_cap: 0.9,
+  weibull_k_min: 0.4,
+  weibull_k_max: 1.6,
+  weibull_k_step: 0.04,
+  weibull_lam_min: 500,
+  weibull_lam_max: 15000,
+  weibull_lam_step: 500,
+  weibull_horizon_days: 365,
+  weibull_ref_days: 90,
+  lri_cat_weight: 40,
+  lri_scale_weight: 25,
+  lri_mom_weight: 20,
+  lri_age_weight: 15,
 };
 
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 export const EARLY_ROWS = 160;
 export const LIVE_ROWS = 24;
 
@@ -122,6 +178,13 @@ export interface BoardRow {
   implied_value_usd: number;
   launch_value_usd: number;
   launch_probability: number;
+  /** Launch Readiness Index, 0-100: how ready this protocol is to launch (a different question from implied value). */
+  launch_readiness: number;
+  readiness_parts: { cat: number; scale: number; mom: number; age: number };
+  /** The three closest launched comparables in the same category, by TVL proximity. */
+  peers: Array<{ slug: string; name: string; tvl_usd: number; ratio: number }>;
+  /** Plain-language line naming the factor that drives this rank. */
+  why_rank: string;
   model: {
     category_multiple: number;
     category_iqr: [number, number];
@@ -148,6 +211,10 @@ export interface RadarRow {
   implied_value_usd: number;
   launch_value_usd: number;
   launch_probability: number;
+  launch_readiness: number;
+  readiness_parts: { cat: number; scale: number; mom: number; age: number };
+  peers: Array<{ slug: string; name: string; tvl_usd: number; ratio: number }>;
+  why_rank: string;
   category_multiple: number;
   category_iqr: [number, number];
   growth_multiplier: number;
@@ -219,7 +286,22 @@ export interface RadarData {
   category_multiples: Record<string, { n: number; multiple: number; iqr: [number, number] }>;
   global_launch_rate: number;
   launch_rates: Record<string, { n: number; rate: number }>;
+  /** The fitted Weibull hazard (k, lambda) behind the age discount, plus its log-likelihood. */
+  weibull: { k: number; lambda: number; loglik: number };
   validation: HeldOutValidation;
+  /** Cross-cutting insights, all computed from the snapshot at runtime. */
+  insights: {
+    /** Median 7-day TVL change of pre-token protocols per category (n >= 5), best first. */
+    category_momentum: Array<{ category: string; n: number; median_change_7d: number }>;
+    /** Pre-token TVL per category, largest first. */
+    pretoken_tvl: Array<{ category: string; n: number; tvl_usd: number }>;
+    /** Biggest launch value outside the implied top 10 — the odds are holding these back. */
+    held_back: Array<{ slug: string; name: string; rank: number; launch_value_usd: number; launch_probability: number; implied_value_usd: number }>;
+    /** Launch-odds distribution across the 200 rows: counts in five buckets. */
+    odds_buckets: Array<{ label: string; count: number }>;
+    /** Median 7-day change of pre-token protocols in each board row's category, for the detail view. */
+    category_median_change: Record<string, number>;
+  };
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -350,6 +432,89 @@ export function maturityMultiplier(age: number | null, model: ModelConstants = M
   return model.maturity_floor + (Math.min(Math.max(days, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
 }
 
+// ---------------------------------------------------------------- fitted Weibull age discount
+
+/** A fitted Weibull hazard: P(token by age a) = 1 - exp(-(a/lambda)^k), plus the fit's log-likelihood. */
+export interface WeibullFit {
+  k: number;
+  lambda: number;
+  loglik: number;
+}
+
+/**
+ * The Weibull hazard fitted to the snapshot itself, by current-status
+ * maximum likelihood: a protocol that carries a token contributes
+ * log P(token by its age), one that does not contributes log P(no token
+ * by its age). Grid-searched over the k/lambda ranges in MODEL, so the
+ * fit is deterministic and reproducible. Ages under one day count as one
+ * day (a protocol listed today has had no time to launch, but log(0)
+ * would sink the fit). Protocols with no listing date are left out.
+ * Fewer than 10 usable protocols falls back to a neutral shape (k = 1,
+ * lambda = 10000) rather than a fit on noise.
+ */
+export function fitWeibull(
+  protocols: SnapshotProtocol[],
+  asOf: string,
+  model: ModelConstants = MODEL,
+): WeibullFit {
+  const rows: Array<{ age: number; token: boolean }> = [];
+  for (const p of protocols) {
+    const age = ageDays(asOf, p.listed_at);
+    if (age === null) continue;
+    rows.push({ age: Math.max(age, 1), token: p.mcap_usd !== null });
+  }
+  if (rows.length < 10) return { k: 1, lambda: 10000, loglik: 0 };
+  let best: WeibullFit = { k: 1, lambda: 10000, loglik: -Infinity };
+  for (let k = model.weibull_k_min; k <= model.weibull_k_max + 1e-9; k += model.weibull_k_step) {
+    for (let lam = model.weibull_lam_min; lam <= model.weibull_lam_max; lam += model.weibull_lam_step) {
+      let ll = 0;
+      for (const r of rows) {
+        const x = (r.age / lam) ** k;
+        if (r.token) {
+          const t = 1 - Math.exp(-x);
+          ll += t > 0 ? Math.log(t) : Math.log(x);
+        } else {
+          ll -= x;
+        }
+      }
+      if (ll > best.loglik) best = { k: round4(k), lambda: lam, loglik: Math.round(ll * 100) / 100 };
+    }
+  }
+  return best;
+}
+
+/** The Weibull survival at an age: P(no token by age a). */
+export function weibullSurvival(age: number, fit: WeibullFit): number {
+  return Math.exp(-(((Math.max(age, 0)) / fit.lambda) ** fit.k));
+}
+
+/** The 1-year forward launch probability at an age: P(launch in the next year | survived to a). */
+export function weibullForward(age: number, fit: WeibullFit, horizonDays: number): number {
+  const s0 = weibullSurvival(age, fit);
+  if (s0 <= 0) return 0;
+  return 1 - weibullSurvival(age + horizonDays, fit) / s0;
+}
+
+/**
+ * The age discount from the fitted hazard: the 1-year forward launch
+ * probability at this age, relative to a 90-day-old protocol (which scores
+ * 1.0). Young protocols are not boosted above 1.0 — the discount only
+ * ever lowers odds. Unknown age scores 0.85, the same neutral value v2
+ * used. k < 1 means a decreasing hazard: surviving years without launching
+ * lowers the next year's odds.
+ */
+export function ageDiscount(age: number | null, fit: WeibullFit, model: ModelConstants = MODEL): number {
+  if (age === null) return 0.85;
+  const ref = weibullForward(model.weibull_ref_days, fit, model.weibull_horizon_days);
+  if (ref <= 0) return 1;
+  return clamp(weibullForward(age, fit, model.weibull_horizon_days) / ref, 0, 1);
+}
+
+/** The v2 hand-set age steps, kept only so the prior test can score them against the fitted discount. */
+export function ageFactorSteps(age: number | null): number {
+  return age === null ? 0.85 : age < 180 ? 1.0 : age < 365 ? 0.95 : age < 730 ? 0.9 : age < 1095 ? 0.8 : 0.7;
+}
+
 /**
  * The fitted launch rates: the global share of protocols that carry a token,
  * and one rate per category — the category's token share shrunk toward the
@@ -396,24 +561,34 @@ export function launchRate(
 
 /**
  * The launch odds: the category's empirical token rate, discounted by age.
- * The age discount is a survivorship prior, not a cross-sectional finding:
- * in the cross-section older protocols are MORE likely to carry a token
- * (they have had time to launch), but a protocol that has existed for years
- * WITHOUT launching has shown it does not launch, so its future odds are
- * lower. No size factor: token rate by TVL quartile is flat (smallest
- * quartile 0.249, largest 0.168), so a bigger TVL does not mean higher odds.
- * TVL and age already enter through launch value, so the odds carry only
- * the category rate and the age discount — no double-counting.
+ * The age discount is now the fitted Weibull hazard (see ageDiscount), not
+ * a hand-set table: the snapshot's own launch history says how the odds of
+ * launching next year fall with age. No size factor: token rate by TVL
+ * quartile is flat (smallest quartile 0.249, largest 0.168), so a bigger
+ * TVL does not mean higher odds. TVL and age already enter through launch
+ * value, so the odds carry only the category rate and the age discount —
+ * no double-counting.
  */
 export function launchProbability(
   p: SnapshotProtocol,
   age: number | null,
   fitted: { global: number; byCategory: Map<string, { n: number; rate: number }> },
   model: ModelConstants = MODEL,
+  weibull: WeibullFit,
 ): number {
   const base = launchRate(p.category, fitted);
-  const ageFactor = age === null ? 0.85 : age < 180 ? 1.0 : age < 365 ? 0.95 : age < 730 ? 0.9 : age < 1095 ? 0.8 : 0.7;
-  return round4(clamp(base * ageFactor, model.prob_floor, model.prob_cap));
+  return round4(clamp(base * ageDiscount(age, weibull, model), model.prob_floor, model.prob_cap));
+}
+
+/** The launch odds with v2's hand-set age steps, kept only for the prior test's comparison. */
+export function launchProbabilitySteps(
+  p: SnapshotProtocol,
+  age: number | null,
+  fitted: { global: number; byCategory: Map<string, { n: number; rate: number }> },
+  model: ModelConstants = MODEL,
+): number {
+  const base = launchRate(p.category, fitted);
+  return round4(clamp(base * ageFactorSteps(age), model.prob_floor, model.prob_cap));
 }
 
 /** One protocol's full valuation: launch value before odds, implied value after. */
@@ -423,6 +598,7 @@ export function scoreProtocol(
   fitted: { global: number; globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
   rates: { global: number; byCategory: Map<string, { n: number; rate: number }> },
   model: ModelConstants = MODEL,
+  weibull: WeibullFit,
 ): {
   age: number | null;
   categoryMultiple: number;
@@ -440,9 +616,118 @@ export function scoreProtocol(
   const { pct: growthPct, mult: growthMult } = growthMultiplier(p.change_7d, model);
   const maturityMult = maturityMultiplier(age, model);
   const launchValue = p.tvl_usd * catMult * growthMult * maturityMult;
-  const probability = launchProbability(p, age, rates, model);
+  const probability = launchProbability(p, age, rates, model, weibull);
   const implied = Math.max(1, Math.round(launchValue * probability));
   return { age, categoryMultiple: catMult, categoryIqr: catIqr, growthPct, growthMult, maturityMult, launchValue, probability, implied };
+}
+
+// ---------------------------------------------------------------- readiness, peers, why
+
+/** A dollar amount in short form ($1.2B, $45M, $3K) for plain-language lines. */
+function fmtUsd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/**
+ * The Launch Readiness Index (LRI), 0-100: how ready this protocol is to
+ * launch — a different question from implied value, which asks what a
+ * launch would be worth. Four parts, each scored 0-100 and combined by
+ * the weights in MODEL: category launch rate (40%), TVL scale (25%),
+ * 7-day momentum (20%), age/maturity (15%). Category and scale are
+ * normalised against the board itself (the highest-rate category and the
+ * log-TVL range of the ranked rows), so the index is a relative lens
+ * within this board, not an absolute prediction.
+ */
+export function launchReadiness(
+  p: SnapshotProtocol,
+  s: { age: number | null; growthPct: number },
+  rate: number,
+  ctx: { maxRate: number; minLogTvl: number; maxLogTvl: number },
+  model: ModelConstants = MODEL,
+): { readiness: number; parts: { cat: number; scale: number; mom: number; age: number } } {
+  const cat = ctx.maxRate > 0 ? (rate / ctx.maxRate) * 100 : 0;
+  const logTvl = Math.log10(Math.max(p.tvl_usd, 1));
+  const scale = ctx.maxLogTvl > ctx.minLogTvl ? ((logTvl - ctx.minLogTvl) / (ctx.maxLogTvl - ctx.minLogTvl)) * 100 : 50;
+  const mom = ((clamp(s.growthPct, model.growth_floor, model.growth_cap) + 60) / 180) * 100;
+  const ageDays = s.age ?? model.unknown_age_days;
+  const age = (Math.min(Math.max(ageDays, 0), model.maturity_days) / model.maturity_days) * 100;
+  const parts = { cat: Math.round(cat), scale: Math.round(scale), mom: Math.round(mom), age: Math.round(age) };
+  const readiness = Math.round(
+    (model.lri_cat_weight * cat + model.lri_scale_weight * scale + model.lri_mom_weight * mom + model.lri_age_weight * age) / 100,
+  );
+  return { readiness: clamp(readiness, 0, 100), parts };
+}
+
+/**
+ * The three closest launched comparables in the same category, by TVL
+ * proximity (nearest in log TVL first). If the category holds fewer than
+ * three, the rest come from the closest comparables anywhere, so every
+ * row still shows three peers. Dead tokens (market cap 0 — Multichain,
+ * Phemex and 13 others in this snapshot) are skipped as peers: a $0
+ * market cap says nothing about what a launch is worth. They still count
+ * in the fitted multiples, exactly as in v2, so the validation numbers
+ * stay comparable.
+ */
+export function peersFor(
+  p: SnapshotProtocol,
+  comps: SnapshotProtocol[],
+): Array<{ slug: string; name: string; tvl_usd: number; ratio: number }> {
+  const live = comps.filter((q) => (q.mcap_usd ?? 0) > 0);
+  const dist = (q: SnapshotProtocol): number => Math.abs(Math.log10(q.tvl_usd / Math.max(p.tvl_usd, 1)));
+  const same = live
+    .filter((q) => q.category === p.category && q.slug !== p.slug)
+    .sort((a, b) => dist(a) - dist(b));
+  const picked = same.slice(0, 3);
+  if (picked.length < 3) {
+    const rest = live
+      .filter((q) => q.slug !== p.slug && !picked.includes(q))
+      .sort((a, b) => dist(a) - dist(b));
+    picked.push(...rest.slice(0, 3 - picked.length));
+  }
+  return picked.map((q) => ({ slug: q.slug, name: q.name, tvl_usd: q.tvl_usd, ratio: round4(q.mcap_usd! / q.tvl_usd) }));
+}
+
+/**
+ * The plain-language line naming the factor that drives a rank: the
+ * category multiple, the 7-day TVL move, the launch odds, or the TVL
+ * scale — whichever deviates furthest from the board's own centre.
+ */
+export function whyRank(
+  row: { rank: number; category: string | null; tvl_usd: number; launch_probability: number },
+  s: { categoryMultiple: number; growthPct: number },
+  ctx: { globalMultiple: number; globalRate: number; medianTvl: number },
+): string {
+  const cands: Array<{ dev: number; text: string }> = [
+    {
+      dev: Math.abs(Math.log(s.categoryMultiple / ctx.globalMultiple)),
+      text: s.categoryMultiple > ctx.globalMultiple
+        ? `its ${row.category ?? 'category'} multiple of ${s.categoryMultiple.toFixed(3)} — ${(s.categoryMultiple / ctx.globalMultiple).toFixed(1)}x the ${ctx.globalMultiple.toFixed(3)} global median`
+        : `its ${row.category ?? 'category'} multiple of ${s.categoryMultiple.toFixed(3)} — below the ${ctx.globalMultiple.toFixed(3)} global median`,
+    },
+    {
+      dev: Math.abs(s.growthPct) / 50,
+      text: s.growthPct >= 0
+        ? `its +${s.growthPct.toFixed(1)}% 7-day TVL growth`
+        : `its ${s.growthPct.toFixed(1)}% 7-day TVL fall`,
+    },
+    {
+      dev: Math.abs(Math.log(row.launch_probability / ctx.globalRate)),
+      text: row.launch_probability > ctx.globalRate
+        ? `launch odds of ${(row.launch_probability * 100).toFixed(0)}% — above the ${(ctx.globalRate * 100).toFixed(1)}% average`
+        : `launch odds of ${(row.launch_probability * 100).toFixed(0)}% — below the ${(ctx.globalRate * 100).toFixed(1)}% average`,
+    },
+    {
+      dev: Math.abs(Math.log10(row.tvl_usd / ctx.medianTvl)) / 1.5,
+      text: row.tvl_usd > ctx.medianTvl
+        ? `a ${fmtUsd(row.tvl_usd)} TVL — well above the ${fmtUsd(ctx.medianTvl)} board median`
+        : `a ${fmtUsd(row.tvl_usd)} TVL — well below the ${fmtUsd(ctx.medianTvl)} board median`,
+    },
+  ];
+  cands.sort((a, b) => b.dev - a.dev);
+  return `Ranked #${row.rank} mostly on ${cands[0]!.text}.`;
 }
 
 // ---------------------------------------------------------------- farm plans
@@ -542,6 +827,8 @@ export function buildBoard(
   fitted: { global: number; globalIqr: [number, number]; byCategory: Map<string, { n: number; multiple: number; iqr: [number, number] }> },
   rates: { global: number; byCategory: Map<string, { n: number; rate: number }> },
   model: ModelConstants = MODEL,
+  weibull: WeibullFit,
+  comps: SnapshotProtocol[],
 ): BoardRow[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
@@ -555,35 +842,68 @@ export function buildBoard(
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, s: scoreProtocol(p, snapshot.as_of, fitted, rates, model) }));
+  const scored = [...chosen.values()].map((p) => ({ p, s: scoreProtocol(p, snapshot.as_of, fitted, rates, model, weibull) }));
   scored.sort((a, b) => b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map(({ p, s }, i) => ({
-    rank: i + 1,
-    slug: p.slug,
-    name: p.name,
-    category: p.category,
-    chains: p.chains,
-    tvl_usd: p.tvl_usd,
-    change_7d: p.change_7d,
-    mcap_usd: p.mcap_usd,
-    listed_at: p.listed_at,
-    gecko_id: p.gecko_id,
-    symbol: p.symbol,
-    token_status: 'pre-token' as const,
-    age_days: s.age,
-    implied_value_usd: s.implied,
-    launch_value_usd: Math.round(s.launchValue),
-    launch_probability: s.probability,
-    model: {
-      category_multiple: s.categoryMultiple,
-      category_iqr: s.categoryIqr,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      growth_pct: s.growthPct,
+  const enriched = scored.map(({ p, s }, i) => {
+    const row: BoardRow = {
+      rank: i + 1,
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      change_7d: p.change_7d,
+      mcap_usd: p.mcap_usd,
+      listed_at: p.listed_at,
+      gecko_id: p.gecko_id,
+      symbol: p.symbol,
+      token_status: 'pre-token' as const,
       age_days: s.age,
-    },
-    farm_steps: farmSteps(p, s.age),
-  }));
+      implied_value_usd: s.implied,
+      launch_value_usd: Math.round(s.launchValue),
+      launch_probability: s.probability,
+      launch_readiness: 0,
+      readiness_parts: { cat: 0, scale: 0, mom: 0, age: 0 },
+      peers: [],
+      why_rank: '',
+      model: {
+        category_multiple: s.categoryMultiple,
+        category_iqr: s.categoryIqr,
+        growth_multiplier: round4(s.growthMult),
+        maturity_multiplier: round4(s.maturityMult),
+        growth_pct: s.growthPct,
+        age_days: s.age,
+      },
+      farm_steps: farmSteps(p, s.age),
+    };
+    return { row, p, s };
+  });
+  // Second pass: the readiness index, peers and why-line need the whole
+  // board for context (the highest-rate category, the log-TVL range, the
+  // median TVL), so they are computed after the ranks are fixed.
+  const maxRate = Math.max(0.01, ...enriched.map(({ row }) => launchRate(row.category, rates)));
+  const logTvls = enriched.map(({ row }) => Math.log10(Math.max(row.tvl_usd, 1)));
+  const minLogTvl = Math.min(...logTvls);
+  const maxLogTvl = Math.max(...logTvls);
+  const medianTvl = median(enriched.map(({ row }) => row.tvl_usd));
+  for (const { row, p, s } of enriched) {
+    const { readiness, parts } = launchReadiness(
+      p,
+      { age: s.age, growthPct: s.growthPct },
+      launchRate(p.category, rates),
+      { maxRate, minLogTvl, maxLogTvl },
+      model,
+    );
+    row.launch_readiness = readiness;
+    row.readiness_parts = parts;
+    row.peers = peersFor(p, comps);
+    row.why_rank = whyRank(
+      row,
+      { categoryMultiple: s.categoryMultiple, growthPct: s.growthPct },
+      { globalMultiple: fitted.global, globalRate: rates.global, medianTvl },
+    );
+  }
+  return enriched.map((e) => e.row);
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live view. */
@@ -601,6 +921,63 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       mcap_usd: p.mcap_usd,
       change_7d: p.change_7d,
     }));
+}
+
+/**
+ * The cross-cutting insights, all computed from the finished board at
+ * run time: which categories' pre-token TVL is growing fastest, where the
+ * pre-token TVL sits, the biggest launch values the odds are holding
+ * back (outside the implied top 10), and how the 200 rows' launch odds
+ * are distributed.
+ */
+export function buildInsights(board: BoardRow[]): RadarData['insights'] {
+  const byCat = new Map<string, BoardRow[]>();
+  for (const r of board) {
+    const key = r.category ?? 'Unknown';
+    const list = byCat.get(key) ?? [];
+    list.push(r);
+    byCat.set(key, list);
+  }
+  const category_momentum = [...byCat.entries()]
+    .map(([category, rows]) => {
+      const ch = rows.map((r) => r.change_7d).filter((c): c is number => typeof c === 'number');
+      return { category, n: rows.length, median_change_7d: ch.length > 0 ? round4(median(ch)) : null };
+    })
+    .filter((x): x is { category: string; n: number; median_change_7d: number } => x.n >= 5 && x.median_change_7d !== null)
+    .sort((a, b) => b.median_change_7d - a.median_change_7d);
+  const pretoken_tvl = [...byCat.entries()]
+    .map(([category, rows]) => ({ category, n: rows.length, tvl_usd: rows.reduce((s, r) => s + r.tvl_usd, 0) }))
+    .sort((a, b) => b.tvl_usd - a.tvl_usd);
+  const held_back = board
+    .filter((r) => r.rank > 10)
+    .sort((a, b) => b.launch_value_usd - a.launch_value_usd)
+    .slice(0, 5)
+    .map((r) => ({
+      slug: r.slug,
+      name: r.name,
+      rank: r.rank,
+      launch_value_usd: r.launch_value_usd,
+      launch_probability: r.launch_probability,
+      implied_value_usd: r.implied_value_usd,
+    }));
+  const odds_buckets: Array<{ label: string; count: number }> = [
+    { label: '<5%', count: 0 },
+    { label: '5–10%', count: 0 },
+    { label: '10–20%', count: 0 },
+    { label: '20–35%', count: 0 },
+    { label: '35%+', count: 0 },
+  ];
+  for (const r of board) {
+    const p = r.launch_probability;
+    const i = p < 0.05 ? 0 : p < 0.1 ? 1 : p < 0.2 ? 2 : p < 0.35 ? 3 : 4;
+    odds_buckets[i]!.count++;
+  }
+  const category_median_change: Record<string, number> = {};
+  for (const [category, rows] of byCat) {
+    const ch = rows.map((r) => r.change_7d).filter((c): c is number => typeof c === 'number');
+    if (ch.length > 0) category_median_change[category] = round4(median(ch));
+  }
+  return { category_momentum, pretoken_tvl, held_back, odds_buckets, category_median_change };
 }
 
 // ---------------------------------------------------------------- held-out validation
@@ -703,6 +1080,7 @@ export function priorValidation(snapshot: Snapshot, model: ModelConstants = MODE
   const trainRows = snapshot.protocols.filter((p) => splitBucket(p.slug) < 8);
   const testRows = snapshot.protocols.filter((p) => splitBucket(p.slug) >= 8);
   const rates = fitLaunchRates(trainRows, model);
+  const weibull = fitWeibull(trainRows, snapshot.as_of, model);
   const v1 = (p: SnapshotProtocol): number => {
     const infra = new Set(['Chain', 'Bridge', 'Canonical Bridge', 'Cross Chain Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaking', 'Staking Pool']);
     const other = new Set(['CEX', 'Payments', 'Insurance', 'CeDeFi', 'Governance Incentives', 'Stablecoin Wrapper', 'Collateral Markets', 'Collateral Management', 'Dual-Token Stablecoin', 'Privacy']);
@@ -740,7 +1118,12 @@ export function priorValidation(snapshot: Snapshot, model: ModelConstants = MODE
     };
   };
   return [
-    scorePrior('empirical category rate (v2)', (p) => launchProbability(p, ageDays(snapshot.as_of, p.listed_at), rates, model)),
+    scorePrior('empirical category rate + Weibull age discount (v3)', (p) =>
+      launchProbability(p, ageDays(snapshot.as_of, p.listed_at), rates, model, weibull)),
+    scorePrior('empirical category rate + hand-set age steps (v2)', (p) =>
+      launchProbabilitySteps(p, ageDays(snapshot.as_of, p.listed_at), rates, model)),
+    scorePrior('empirical category rate, no age discount', (p) =>
+      round4(clamp(launchRate(p.category, rates), model.prob_floor, model.prob_cap))),
     scorePrior('hand-set group prior (v1)', v1),
     scorePrior('global token rate (constant)', () => rates.global),
   ];
@@ -764,6 +1147,10 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     implied_value_usd: row.implied_value_usd,
     launch_value_usd: row.launch_value_usd,
     launch_probability: row.launch_probability,
+    launch_readiness: row.launch_readiness,
+    readiness_parts: row.readiness_parts,
+    peers: row.peers,
+    why_rank: row.why_rank,
     category_multiple: row.model.category_multiple,
     category_iqr: row.model.category_iqr,
     growth_multiplier: row.model.growth_multiplier,
@@ -777,7 +1164,9 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const fitted = fitMultiples(snapshot.protocols, model);
   const rates = fitLaunchRates(snapshot.protocols, model);
-  const board = buildBoard(snapshot, fitted, rates, model);
+  const weibull = fitWeibull(snapshot.protocols, snapshot.as_of, model);
+  const comps = comparables(snapshot.protocols);
+  const board = buildBoard(snapshot, fitted, rates, model, weibull, comps);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const categoryMultiples: Record<string, { n: number; multiple: number; iqr: [number, number] }> = {};
@@ -799,7 +1188,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     category_multiples: categoryMultiples,
     global_launch_rate: rates.global,
     launch_rates: launchRates,
+    weibull,
     validation: heldOutValidation(snapshot, model),
+    insights: buildInsights(board),
     rows: board.map((r) => radarRow(r, snapshot.watchlist.includes(r.slug))),
     live,
   };
@@ -867,6 +1258,11 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     if (typeof r.launch_probability !== 'number' || r.launch_probability < 0.02 || r.launch_probability > 0.9) {
       return `${r.slug} has launch probability ${r.launch_probability}`;
     }
+    if (typeof r.launch_readiness !== 'number' || r.launch_readiness < 0 || r.launch_readiness > 100) {
+      return `${r.slug} has launch readiness ${r.launch_readiness}`;
+    }
+    if (r.peers.length !== 3) return `${r.slug} has ${r.peers.length} peers, not 3`;
+    if (typeof r.why_rank !== 'string' || r.why_rank.length < 20) return `${r.slug} has no why_rank line`;
     if (r.farm_steps.length < 3 || r.farm_steps.length > 12) return `${r.slug} has ${r.farm_steps.length} farm steps`;
     for (const s of r.farm_steps) {
       if (s.length < 20 || s.length > 600) return `${r.slug} has a farm step of ${s.length} characters`;
